@@ -990,14 +990,28 @@ func boot(routes: RoutesBuilder) throws {
 import { reactResolver } from '../src/resolution/frameworks/react';
 import { svelteResolver } from '../src/resolution/frameworks/svelte';
 
-describe('reactResolver.extract (smoke)', () => {
-  it('returns { nodes, references } shape', () => {
+describe('reactResolver.extract — React Router', () => {
+  it('extracts a v6 <Route path element={<Comp/>}>', () => {
     const src = `<Route path="/users" element={<UsersPage/>}/>`;
-    const result = reactResolver.extract!('App.tsx', src);
-    expect(result).toHaveProperty('nodes');
-    expect(result).toHaveProperty('references');
-    expect(Array.isArray(result.nodes)).toBe(true);
-    expect(Array.isArray(result.references)).toBe(true);
+    const { nodes, references } = reactResolver.extract!('App.tsx', src);
+    const route = nodes.find((n) => n.kind === 'route');
+    expect(route?.name).toBe('/users');
+    expect(references[0]?.referenceName).toBe('UsersPage');
+  });
+
+  it('extracts a v5 <Route path component={Comp}> with attributes in any order', () => {
+    const src = `<Route exact path="/login" component={Login} />`;
+    const { nodes, references } = reactResolver.extract!('App.jsx', src);
+    const route = nodes.find((n) => n.kind === 'route');
+    expect(route?.name).toBe('/login');
+    expect(references[0]?.referenceName).toBe('Login');
+  });
+
+  it('does not treat the <Routes> container as a route', () => {
+    const src = `<Routes><Route path="/x" element={<X/>}/></Routes>`;
+    const routes = reactResolver.extract!('App.tsx', src).nodes.filter((n) => n.kind === 'route');
+    expect(routes).toHaveLength(1);
+    expect(routes[0]?.name).toBe('/x');
   });
 });
 

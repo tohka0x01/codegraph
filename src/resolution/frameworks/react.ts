@@ -76,6 +76,7 @@ export const reactResolver: FrameworkResolver = {
 
   extract(filePath, content) {
     const nodes: Node[] = [];
+    const references: UnresolvedRef[] = [];
     const now = Date.now();
 
     // Extract component definitions
@@ -143,6 +144,48 @@ export const reactResolver: FrameworkResolver = {
       });
     }
 
+    // React Router: <Route path="/x" component={Comp}/> (v5) or
+    // <Route path="/x" element={<Comp/>}/> (v6). Attributes appear in any order,
+    // and element={...} contains a nested `>`, so scan a window after each
+    // <Route rather than trying to match the whole (possibly multi-line) tag.
+    const routeTagRegex = /<Route\b/g;
+    let routeMatch: RegExpExecArray | null;
+    while ((routeMatch = routeTagRegex.exec(content)) !== null) {
+      const window = content.slice(routeMatch.index, routeMatch.index + 400);
+      const pathMatch = window.match(/\bpath\s*=\s*["']([^"']+)["']/);
+      if (!pathMatch) continue; // index/layout routes without a path
+      const routePath = pathMatch[1]!;
+      const compMatch =
+        window.match(/\bcomponent\s*=\s*\{\s*([A-Z][A-Za-z0-9_]*)/) ||
+        window.match(/\belement\s*=\s*\{\s*<\s*([A-Z][A-Za-z0-9_]*)/);
+      const line = content.slice(0, routeMatch.index).split('\n').length;
+      const routeNode: Node = {
+        id: `route:${filePath}:${line}:${routePath}`,
+        kind: 'route',
+        name: routePath,
+        qualifiedName: `${filePath}::route:${routePath}`,
+        filePath,
+        startLine: line,
+        endLine: line,
+        startColumn: 0,
+        endColumn: 0,
+        language: filePath.endsWith('.tsx') ? 'tsx' : 'jsx',
+        updatedAt: now,
+      };
+      nodes.push(routeNode);
+      if (compMatch) {
+        references.push({
+          fromNodeId: routeNode.id,
+          referenceName: compMatch[1]!,
+          referenceKind: 'references',
+          line,
+          column: 0,
+          filePath,
+          language: filePath.endsWith('.tsx') ? 'tsx' : 'jsx',
+        });
+      }
+    }
+
     // Extract Next.js pages/routes (pages directory convention)
     if (filePath.includes('pages/') || filePath.includes('app/')) {
       // Default export in pages becomes a route
@@ -169,7 +212,7 @@ export const reactResolver: FrameworkResolver = {
       }
     }
 
-    return { nodes, references: [] };
+    return { nodes, references };
   },
 };
 
