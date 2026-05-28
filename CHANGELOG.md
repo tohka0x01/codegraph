@@ -61,6 +61,71 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `.spec.tsx`, and Java/Kotlin/Scala `*Test.java` / `*Spec.kt`. Without
   this, etcd's `watchable_store_test.go` consumed 5K chars of explore
   budget that should have gone to the hand-written flow source.
+- **Small-repo retrieval tuning (`<500` indexed files).** Three coordinated
+  changes so small projects resolve flow questions in 1-2 MCP calls instead
+  of 3-5. (i) MCP tool surface drops to the 5 core tools
+  (`codegraph_search` / `codegraph_context` / `codegraph_node` /
+  `codegraph_explore` / `codegraph_trace`); the other 5 (`codegraph_callers`
+  /`codegraph_callees`/`codegraph_impact`/`codegraph_status`/`codegraph_files`)
+  cost more in tool-list overhead than they recoup at this scale.
+  Empirically validated as the floor — n=2 audits showed cutting below
+  5 regresses cobra/ky/sinatra (3-tool gate) and catastrophically regresses
+  express (1-tool gate, +107% LOSS). (ii) `codegraph_context` responses end
+  with a strong directive telling the agent the response IS the
+  comprehensive pass for a project this size and follow-ups should be
+  narrow (`trace from→to`, single-symbol `node`) — not another broad
+  `codegraph_explore` that re-bundles the same content. (iii) Explore
+  output budget gets a sub-150 tier (13K total / 4 files / 3.8K each,
+  Relationships section dropped, test/spec/icon/i18n files hard-excluded
+  from the relevant-file set unless the query is about tests), and
+  `codegraph_context` `maxNodes` defaults to 8 instead of 20.
+- **`codegraph_context` auto-traces flow queries.** When the task reads
+  like "how does X reach Y", "trace the path from A to B", or "how does
+  X propagate through Z", `codegraph_context` now runs the trace
+  internally and splices its body into the response. Detection is
+  conservative — needs a flow keyword AND ≥2 distinct PascalCase /
+  camelCase identifiers, with the first two ordered by appearance taken
+  as `from`/`to`. On dynamic-dispatch breaks it falls back to the
+  trace-failure response (which already inlines both endpoint bodies +
+  neighbors). Saves the follow-up `codegraph_trace` that was the #2
+  cost driver on multi-module flow questions in the audit.
+- **Routing-manifest inline in `codegraph_context` for small-repo
+  routing queries.** When the task mentions
+  routes/handlers/endpoints/middleware/etc. on a sub-500-file project,
+  `codegraph_context` now appends a compact URL → handler table built
+  from `route` nodes + their `references`/`calls` edges, then inlines
+  the full source (≤16KB) of the file holding the most handler
+  endpoints. Targets the Glob+Read pattern that was beating codegraph
+  on realworld template repos (rails-realworld, laravel-realworld,
+  drupal-admintoolbar, …) where the agent would just read `routes.rb` /
+  `web.php` instead of asking the graph. Manifest is silently skipped
+  when fewer than 3 non-test routes exist or no file holds ≥30% of
+  them (no single answer file).
+- **Core-directory ranking boost in `codegraph_context` search.**
+  Projects with one file holding the dense majority of internal call
+  edges (e.g. sinatra's `lib/sinatra/base.rb` at ~85% of all in-file
+  edges) now get search results in that file's directory boosted by
+  +25 score. Fixes the case where a small extension file with a
+  verbatim name match outranks the actual framework core
+  (sinatra-contrib's `multi_route.rb` `route` was outranking
+  base.rb's `route!`). Test and generated files are excluded from
+  "dominant file" candidacy so etcd's `rpc.pb.go` (1916 in-file
+  edges, generated protobuf) can't beat the hand-written
+  `server/etcdserver/server.go` (470 edges).
+- **Interface → implementation synthesis extended beyond JVM.**
+  `interfaceOverrideEdges` previously bridged interface methods to
+  concrete impls in Java/Kotlin only. Now also runs for C#, TypeScript,
+  JavaScript, Swift, and Scala — Swift conformance also iterates
+  `struct` nodes (value-type protocol conformance) alongside `class`.
+  Closes the same structural-typing gap the new Go gRPC bridge closes,
+  for any language where the resolver emits explicit
+  `implements`/`extends` edges.
+- **Shorter MCP tool descriptions.** All 10 `codegraph_*` tool
+  descriptions condensed (typically ~50% shorter), keeping the
+  "use this for X / prefer over Y" steering but dropping the longer
+  rationale (which lives in `server-instructions.ts`, the
+  load-bearing channel). Tool-list bytes on the agent side drop
+  proportionally; cumulative across multi-tool sessions.
 - **Java / Kotlin imports now resolve by fully-qualified name.** Extraction
   wraps every top-level declaration of a `.kt` / `.java` file in a `namespace`
   node carrying the file's `package` (so a class `Bar` in
