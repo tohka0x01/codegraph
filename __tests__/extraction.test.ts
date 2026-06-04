@@ -3445,6 +3445,66 @@ class Service {
   });
 });
 
+describe('Ruby mixins (include/extend/prepend)', () => {
+  let tempDir: string;
+  let cg: CodeGraph;
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+  });
+
+  afterEach(() => {
+    if (cg) cg.close();
+    if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('links include/extend/prepend to the mixed-in module across files', async () => {
+    const lib = path.join(tempDir, 'lib');
+    fs.mkdirSync(lib, { recursive: true });
+
+    fs.writeFileSync(
+      path.join(lib, 'concerns.rb'),
+      `module Trackable
+  def track; end
+end
+
+module Cacheable
+  def cache; end
+end
+
+module Loggable
+  def log; end
+end
+`
+    );
+    fs.writeFileSync(
+      path.join(lib, 'model.rb'),
+      `class Model
+  include Trackable
+  prepend Cacheable
+  extend Loggable
+end
+`
+    );
+
+    cg = CodeGraph.initSync(tempDir);
+    await cg.indexAll();
+    cg.resolveReferences();
+
+    const model = cg.getNodesByKind('class').find((n) => n.name === 'Model');
+    expect(model).toBeDefined();
+
+    // All three mixin forms create an `implements` edge Model → module, so
+    // editing a concern surfaces every class that mixes it in (across files).
+    for (const moduleName of ['Trackable', 'Cacheable', 'Loggable']) {
+      const mod = cg.getNodesByKind('module').find((n) => n.name === moduleName);
+      expect(mod, moduleName).toBeDefined();
+      const impacted = [...cg.getImpactRadius(mod!.id, 3).nodes.values()].map((n) => n.name);
+      expect(impacted, `${moduleName} should be depended on by Model`).toContain('Model');
+    }
+  });
+});
+
 describe('Full Indexing', () => {
   let tempDir: string;
 
