@@ -1317,8 +1317,14 @@ function resolveModuleImportToFile(
     if (imp.localName !== ref.referenceName) continue;
 
     let modulePath: string;
-    if (imp.isNamespace) {
-      // `import * as ns from './x'` / `import mod` — the source IS the module.
+    if (imp.isNamespace || imp.isDefault) {
+      // `import * as ns from './x'` (namespace) or `import x from './x'`
+      // (default) — the dependency is on the MODULE FILE. A default import binds
+      // a (possibly renamed) local to whatever the module's default export is
+      // (`import articlesController from './article.controller'` ← `export
+      // default router`), so the binding name can't be found as a symbol — link
+      // the file the import resolves to instead. External modules don't resolve
+      // (no file), so `import React from 'react'` creates no edge.
       modulePath = imp.source;
     } else if (ref.language === 'python') {
       // `from . import certs` — the imported NAME is a submodule of the source.
