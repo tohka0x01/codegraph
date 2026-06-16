@@ -80,6 +80,62 @@ targets** (see §3).
 
 ---
 
+## 2b. Coverage vs the README (languages + frameworks)
+
+Tracked against the README's **Supported Languages** table (24 rows) and **Framework-aware
+Routes** list. Value-refs is **language-level**, so frameworks are *not* a separate axis (see
+the bottom of this section).
+
+**✅ Done — validated S/M/L (7 + 3 inherited):**
+
+| Language | How |
+|---|---|
+| TypeScript, JavaScript, tsx | file-scope `const`/`var`; the original languages |
+| Python | module-level `NAME =` |
+| Go | package `const`/`var` |
+| Rust | module + impl `const`/`static` |
+| Ruby | class/module `CONST` (the class-scope extension) |
+| **Svelte, Vue, Astro** | **inherited for free** — their extractors re-parse the `<script>`/frontmatter block as `typescript`/`javascript`, which are in `VALUE_REF_LANGS` (verified: a `.svelte` `const` edges its readers). No separate work; no separate matrix row needed. |
+
+**🔜 Remaining — likely the easy path** (constants are file/module-scope, or top-level; do §5: add
+to `VALUE_REF_LANGS`, verify the declarator node type + extractor kind, sweep). Classify each
+*before* building — several are mixed file+class scope:
+
+| Language | Constant forms | Note |
+|---|---|---|
+| C | file-scope `const` / `static const` | `init_declarator` in a `declaration`; `#define` macros aren't value nodes |
+| Kotlin | top-level `const val`/`val` (file-scope) + `companion`/`object` (class-scope) | top-level is easy; companion needs the class-scope gate (present) |
+| Swift | top-level `let` (file) + `static let` in a type (class) | README notes Swift stored properties aren't extracted as own nodes — check |
+| Dart | top-level `const`/`final` (file) + `static const` (class) | mixed |
+| Lua / Luau | file/chunk `local X =` + globals; no `const` keyword | distinctive-name gate (needs `[A-Z_]`) catches fewer — Lua casing varies |
+| R | file-scope `X <- …` / `X = …` | |
+
+**🧱 Remaining — needs the Ruby treatment** (constants live almost entirely **inside a
+class/type**; the class-scope *gate* exists now, but first confirm the extractor emits them as
+`constant`/`variable` nodes — Ruby's weren't extracted at all, and Java/C# fields may come out as
+`field`/`property` kind):
+
+| Language | Constant forms |
+|---|---|
+| Java | `static final` fields in a class |
+| C# | `const` / `static readonly` in a class |
+| Scala | `val` / `final val` in an `object`/`class` |
+| PHP | class `const` + top-level `const` + `define()` |
+| C++ | file-scope + class `static const`/`constexpr` (mixed) |
+| Pascal / Delphi | `const` sections at unit (file) or class scope (mixed) |
+| Objective-C | `static const` / `extern const` / `#define` (file-ish; macros unparsed; already "partial support") |
+
+**🚫 N/A:** Liquid (template language — no value constants to track).
+
+**Frameworks — not a value-refs axis.** The README's framework list (Django, Flask, Express,
+NestJS, Rails, Spring, Gin, Laravel, …) is a *separate* feature: **route-node extraction**.
+Value-refs is framework-agnostic — it covers constants in any framework's code through the
+underlying language support, with **nothing to do per framework**. The validation sweeps already
+ran on framework repos (Rails → Ruby, Django → Python, gin → Go, express/eslint/webpack → JS,
+jekyll/sinatra → Ruby), so framework code is exercised; there's no separate framework matrix.
+
+---
+
 ## 3. Precision guards + what counts as a false positive
 
 Guards run in `flushValueRefs`, in order:

@@ -161,6 +161,12 @@ tsx-specific path — a const read *only* inside JSX (`<Foo x={CONST}/>`) — re
 reader-scan descending into the JSX subtree; it's locked by a unit test
 (`value-reference-edges.test.ts`), so no separate tsx repo sweep is needed.
 
+**Svelte / Vue / Astro are covered for free** — their extractors re-parse the `<script>` /
+frontmatter block as `typescript` / `javascript`, which are in `VALUE_REF_LANGS`, so a `const`
+in a `.svelte`/`.vue`/`.astro` script edges its readers without any extra work (verified on a
+synthetic `.svelte`). No separate matrix row. See the playbook's coverage tracker (§2b) for the
+full status against the README's language list.
+
 **JavaScript note — CommonJS `require` bindings are targets, and that's correct.** JS edge
 growth (~4–5%) runs higher than TS (~0.7–1.6%) because `var x = require('…')` bindings and
 module-level `var` state pass the distinctive-name gate and are read by same-file functions.
