@@ -49,6 +49,7 @@ export type SqliteBackend = 'node-sqlite';
  */
 class NodeSqliteAdapter implements SqliteDatabase {
   private _db: any;
+  private _txDepth = 0;
 
   constructor(dbPath: string) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -108,13 +109,29 @@ class NodeSqliteAdapter implements SqliteDatabase {
 
   transaction<T>(fn: (...args: any[]) => T): (...args: any[]) => T {
     return (...args: any[]) => {
+      // Nested call (a transaction()-wrapped helper invoked from inside another
+      // transaction): run the body directly inside the enclosing transaction.
+      // BEGIN would throw "cannot start a transaction within a transaction",
+      // so no existing caller ever relied on nested rollback granularity —
+      // flattening is behavior-preserving and free.
+      if (this._txDepth > 0) {
+        this._txDepth++;
+        try {
+          return fn(...args);
+        } finally {
+          this._txDepth--;
+        }
+      }
       this._db.exec('BEGIN');
+      this._txDepth = 1;
       try {
         const result = fn(...args);
         this._db.exec('COMMIT');
+        this._txDepth = 0;
         return result;
       } catch (error) {
         this._db.exec('ROLLBACK');
+        this._txDepth = 0;
         throw error;
       }
     };

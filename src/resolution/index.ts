@@ -17,7 +17,7 @@ import {
   ImportMapping,
 } from './types';
 import { matchReference, matchFunctionRef, matchDottedCallChain, matchScopedCallChain, matchMethodCall, sameLanguageFamily, crossesKnownFamily } from './name-matcher';
-import { resolveViaImport, resolveJvmImport, extractImportMappings, extractReExports, loadCppIncludeDirs, isPhpIncludePathRef, isCobolCopybookRef, isNixPathImportRef } from './import-resolver';
+import { resolveViaImport, resolveJvmImport, extractImportMappings, extractReExports, loadCppIncludeDirs, isPhpIncludePathRef, isCobolCopybookRef, isNixPathImportRef, clearImportResolverMemos } from './import-resolver';
 import { detectFrameworks } from './frameworks';
 import { synthesizeCallbackEdges } from './callback-synthesizer';
 import { createYielder, type MaybeYield } from './cooperative-yield';
@@ -372,6 +372,9 @@ export class ReferenceResolver {
     this.knownNames = null;
     this.knownFiles = null;
     this.cachesWarmed = false;
+    // The import-resolver's per-context memos assume the same stable window
+    // as the caches above — drop them together.
+    if (this.context) clearImportResolverMemos(this.context);
   }
 
   /** `readFile` through the LRU content cache (null = read failed, also cached). */
@@ -1236,7 +1239,10 @@ export class ReferenceResolver {
       } else {
         unresolved.push(ref);
       }
-      await maybeYield();
+      // Fast-path the per-ref yield check: awaiting the async no-op costs a
+      // microtask hop per ref, which dominates at ~10⁵ refs (see MaybeYield).
+      const y = maybeYield();
+      if (y) await y;
     }
 
     return {
