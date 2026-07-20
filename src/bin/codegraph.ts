@@ -14,6 +14,8 @@
  *   codegraph sync [path]        Sync changes since last index
  *   codegraph status [path]      Show index status
  *   codegraph query <search>     Search for symbols
+ *   codegraph locate <query>     Locate symbols, paths, source, and affected tests
+ *   codegraph batch [file]       Execute bounded read-only operations from JSON
  *   codegraph files [options]    Show project file structure
  *   codegraph context <task>     Build context for a task
  *   codegraph callers <symbol>   Find what calls a function/method
@@ -199,6 +201,11 @@ const chalk = {
   cyan: (s: string) => `${colors.cyan}${s}${colors.reset}`,
   white: (s: string) => `${colors.white}${s}${colors.reset}`,
   gray: (s: string) => `${colors.gray}${s}${colors.reset}`,
+};
+
+const writeJsonError = (code: string, value: unknown): void => {
+  const message = value instanceof Error ? value.message : String(value);
+  process.stderr.write(`${JSON.stringify({ error: { code, message } })}\n`);
 };
 
 program
@@ -1162,6 +1169,133 @@ program
   });
 
 /**
+ * codegraph locate <query...>
+ *
+ * A structured, bounded location report produced in one graph session. This
+ * is the native CLI equivalent of orchestrating query/callers/callees/impact
+ * across several child processes.
+ */
+program
+  .command('locate <query...>')
+  .description('Locate entry points, relationships, source snippets, and affected tests in one structured call')
+  .option('-p, --path <path>', 'Project path')
+  .option('--hint <hint>', 'Strong code hint; repeat for multiple symbols', (value: string, previous: string[]) => [...previous, value], [])
+  .option('--max-candidates <number>', 'Maximum candidate symbols', '6')
+  .option('-d, --depth <number>', 'Relationship and test traversal depth', '2')
+  .option('--max-snippet-lines <number>', 'Maximum source lines per snippet', '60')
+  .option('--max-snippets <number>', 'Maximum candidates with source snippets', '4')
+  .option('--max-related <number>', 'Maximum callers/callees/affected nodes per candidate', '20')
+  .option('--max-tests <number>', 'Maximum affected tests', '30')
+  .option('--max-paths <number>', 'Maximum paths between candidate symbols', '8')
+  .option('--no-tests', 'Skip affected-test lookup')
+  .option('-j, --json', 'Output as JSON')
+  .action(async (queryParts: string[], options: {
+    path?: string;
+    hint: string[];
+    maxCandidates?: string;
+    depth?: string;
+    maxSnippetLines?: string;
+    maxSnippets?: string;
+    maxRelated?: string;
+    maxTests?: string;
+    maxPaths?: string;
+    tests?: boolean;
+    json?: boolean;
+  }) => {
+    const projectPath = resolveProjectPath(options.path);
+    try {
+      if (!isInitialized(projectPath)) {
+        error(`CodeGraph not initialized in ${projectPath}`);
+        process.exit(1);
+      }
+
+      const { default: CodeGraph } = await loadCodeGraph();
+      const cg = await CodeGraph.open(projectPath);
+      const intent = queryParts.join(' ');
+      const hints = options.hint.length > 0 ? options.hint : [intent];
+      const result = cg.locate({
+        intent,
+        hints,
+        maxCandidates: parseInt(options.maxCandidates || '6', 10),
+        depth: parseInt(options.depth || '2', 10),
+        maxSnippetLines: parseInt(options.maxSnippetLines || '60', 10),
+        maxSnippets: parseInt(options.maxSnippets || '4', 10),
+        maxRelated: parseInt(options.maxRelated || '20', 10),
+        maxTests: parseInt(options.maxTests || '30', 10),
+        maxPaths: parseInt(options.maxPaths || '8', 10),
+        includeTests: options.tests !== false,
+      });
+
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else if (result.candidates.length === 0) {
+        info(result.unresolved[0] ?? `No symbols found for "${intent}"`);
+      } else {
+        console.log(chalk.bold(`\nLocation report for "${intent}":\n`));
+        for (const candidate of result.candidates) {
+          console.log(chalk.cyan(candidate.kind.padEnd(12)) + chalk.white(candidate.qualifiedName));
+          console.log(chalk.dim(`  ${candidate.filePath}:${candidate.startLine}-${candidate.endLine}`));
+          console.log(chalk.dim(`  hints: ${candidate.matchedHints.join(', ')} · callers: ${candidate.callers.length} · callees: ${candidate.callees.length}`));
+          console.log();
+        }
+        if (result.affectedTests.length > 0) {
+          console.log(chalk.bold('Affected tests:'));
+          for (const testFile of result.affectedTests) console.log(`  ${testFile}`);
+        }
+      }
+
+      cg.destroy();
+    } catch (err) {
+      if (options.json) writeJsonError('LOCATE_FAILED', err);
+      else error(`Locate failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+const MAX_BATCH_REQUEST_BYTES = 1024 * 1024;
+
+/**
+ * codegraph batch [file]
+ *
+ * Executes a bounded JSON request while opening the graph once. Requests may
+ * be read from a file or stdin and always produce a JSON result envelope.
+ */
+program
+  .command('batch [file]')
+  .description('Execute bounded read-only graph operations from a JSON request')
+  .option('-p, --path <path>', 'Project path')
+  .option('--stdin', 'Read the JSON request from stdin')
+  .action(async (file: string | undefined, options: { path?: string; stdin?: boolean }) => {
+    const projectPath = resolveProjectPath(options.path);
+    try {
+      if (Boolean(file) === Boolean(options.stdin)) {
+        error('Pass exactly one batch request source: a file or --stdin');
+        process.exit(1);
+      }
+      if (!isInitialized(projectPath)) {
+        error(`CodeGraph not initialized in ${projectPath}`);
+        process.exit(1);
+      }
+
+      const raw = options.stdin
+        ? fs.readFileSync(0, 'utf8')
+        : fs.readFileSync(path.resolve(file!), 'utf8');
+      if (Buffer.byteLength(raw, 'utf8') > MAX_BATCH_REQUEST_BYTES) {
+        throw new Error(`batch request exceeds ${MAX_BATCH_REQUEST_BYTES} bytes`);
+      }
+      const request = JSON.parse(raw) as import('../batch').BatchRequest;
+      const { default: CodeGraph } = await loadCodeGraph();
+      const cg = await CodeGraph.open(projectPath);
+      const result = cg.executeBatch(request);
+      console.log(JSON.stringify(result, null, 2));
+      cg.destroy();
+    } catch (err) {
+      writeJsonError('BATCH_FAILED', err);
+      process.exit(1);
+    }
+  });
+
+/**
  * codegraph explore <query...>
  *
  * The CLI face of the MCP codegraph_explore tool — same handler, same
@@ -1849,34 +1983,27 @@ program
       const cg = await CodeGraph.open(projectPath);
       const limit = parseInt(options.limit || '20', 10);
 
-      const matches = cg.searchNodes(symbol, { limit: 50 });
+      const { resolveSymbolNodes } = await import('../symbol-resolution');
+      const matches = resolveSymbolNodes(cg, symbol, 50);
       if (matches.length === 0) {
-        info(`Symbol "${symbol}" not found`);
+        if (options.json) console.log(JSON.stringify({ symbol, callers: [] }, null, 2));
+        else info(`Symbol "${symbol}" not found`);
         cg.destroy();
         return;
       }
 
       const seen = new Set<string>();
       const allCallers: Array<{ name: string; kind: string; filePath: string; startLine?: number }> = [];
-
       for (const match of matches) {
-        const exactMatch = match.node.name === symbol || match.node.name.endsWith(`.${symbol}`) || match.node.name.endsWith(`::${symbol}`);
-        if (!exactMatch && matches.length > 1) continue;
-        for (const c of cg.getCallers(match.node.id)) {
-          if (!seen.has(c.node.id)) {
-            seen.add(c.node.id);
-            allCallers.push({ name: c.node.name, kind: c.node.kind, filePath: c.node.filePath, startLine: c.node.startLine });
-          }
-        }
-      }
-
-      // Fallback: if exact filter removed everything, use the top match
-      if (allCallers.length === 0 && matches[0]) {
-        for (const c of cg.getCallers(matches[0].node.id)) {
-          if (!seen.has(c.node.id)) {
-            seen.add(c.node.id);
-            allCallers.push({ name: c.node.name, kind: c.node.kind, filePath: c.node.filePath, startLine: c.node.startLine });
-          }
+        for (const caller of cg.getCallers(match.id)) {
+          if (seen.has(caller.node.id)) continue;
+          seen.add(caller.node.id);
+          allCallers.push({
+            name: caller.node.name,
+            kind: caller.node.kind,
+            filePath: caller.node.filePath,
+            startLine: caller.node.startLine,
+          });
         }
       }
 
@@ -1928,33 +2055,27 @@ program
       const cg = await CodeGraph.open(projectPath);
       const limit = parseInt(options.limit || '20', 10);
 
-      const matches = cg.searchNodes(symbol, { limit: 50 });
+      const { resolveSymbolNodes } = await import('../symbol-resolution');
+      const matches = resolveSymbolNodes(cg, symbol, 50);
       if (matches.length === 0) {
-        info(`Symbol "${symbol}" not found`);
+        if (options.json) console.log(JSON.stringify({ symbol, callees: [] }, null, 2));
+        else info(`Symbol "${symbol}" not found`);
         cg.destroy();
         return;
       }
 
       const seen = new Set<string>();
       const allCallees: Array<{ name: string; kind: string; filePath: string; startLine?: number }> = [];
-
       for (const match of matches) {
-        const exactMatch = match.node.name === symbol || match.node.name.endsWith(`.${symbol}`) || match.node.name.endsWith(`::${symbol}`);
-        if (!exactMatch && matches.length > 1) continue;
-        for (const c of cg.getCallees(match.node.id)) {
-          if (!seen.has(c.node.id)) {
-            seen.add(c.node.id);
-            allCallees.push({ name: c.node.name, kind: c.node.kind, filePath: c.node.filePath, startLine: c.node.startLine });
-          }
-        }
-      }
-
-      if (allCallees.length === 0 && matches[0]) {
-        for (const c of cg.getCallees(matches[0].node.id)) {
-          if (!seen.has(c.node.id)) {
-            seen.add(c.node.id);
-            allCallees.push({ name: c.node.name, kind: c.node.kind, filePath: c.node.filePath, startLine: c.node.startLine });
-          }
+        for (const callee of cg.getCallees(match.id)) {
+          if (seen.has(callee.node.id)) continue;
+          seen.add(callee.node.id);
+          allCallees.push({
+            name: callee.node.name,
+            kind: callee.node.kind,
+            filePath: callee.node.filePath,
+            startLine: callee.node.startLine,
+          });
         }
       }
 
@@ -2006,41 +2127,38 @@ program
       const cg = await CodeGraph.open(projectPath);
       const depth = Math.min(Math.max(parseInt(options.depth || '2', 10), 1), 10);
 
-      const matches = cg.searchNodes(symbol, { limit: 50 });
+      const { resolveSymbolNodes } = await import('../symbol-resolution');
+      const matches = resolveSymbolNodes(cg, symbol, 50);
       if (matches.length === 0) {
-        info(`Symbol "${symbol}" not found`);
+        if (options.json) {
+          console.log(JSON.stringify({ symbol, depth, nodeCount: 0, edgeCount: 0, affected: [] }, null, 2));
+        } else {
+          info(`Symbol "${symbol}" not found`);
+        }
         cg.destroy();
         return;
       }
 
-      // Merge impact subgraphs across all exact-matching symbols
       const mergedNodes = new Map<string, { name: string; kind: string; filePath: string; startLine?: number }>();
       const seenEdges = new Set<string>();
       let edgeCount = 0;
 
       for (const match of matches) {
-        const exactMatch = match.node.name === symbol || match.node.name.endsWith(`.${symbol}`) || match.node.name.endsWith(`::${symbol}`);
-        if (!exactMatch && matches.length > 1) continue;
-        const impact = cg.getImpactRadius(match.node.id, depth);
-        for (const [id, n] of impact.nodes) {
-          mergedNodes.set(id, { name: n.name, kind: n.kind, filePath: n.filePath, startLine: n.startLine });
+        const impact = cg.getImpactRadius(match.id, depth);
+        for (const [id, node] of impact.nodes) {
+          mergedNodes.set(id, {
+            name: node.name,
+            kind: node.kind,
+            filePath: node.filePath,
+            startLine: node.startLine,
+          });
         }
-        for (const e of impact.edges) {
-          const key = `${e.source}->${e.target}:${e.kind}`;
-          if (!seenEdges.has(key)) {
-            seenEdges.add(key);
-            edgeCount++;
-          }
+        for (const edge of impact.edges) {
+          const key = `${edge.source}->${edge.target}:${edge.kind}`;
+          if (seenEdges.has(key)) continue;
+          seenEdges.add(key);
+          edgeCount += 1;
         }
-      }
-
-      // Fallback to top match if exact filter removed everything
-      if (mergedNodes.size === 0 && matches[0]) {
-        const impact = cg.getImpactRadius(matches[0].node.id, depth);
-        for (const [id, n] of impact.nodes) {
-          mergedNodes.set(id, { name: n.name, kind: n.kind, filePath: n.filePath, startLine: n.startLine });
-        }
-        edgeCount = impact.edges.length;
       }
 
       if (options.json) {

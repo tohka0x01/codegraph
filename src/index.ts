@@ -48,6 +48,8 @@ import {
 } from './resolution';
 import { GraphTraverser, GraphQueryManager } from './graph';
 import { ContextBuilder, createContextBuilder } from './context';
+import { locateCode, type LocateRequest, type LocateResult } from './locate';
+import { executeBatch as executeBatchOperations, type BatchRequest, type BatchResult } from './batch';
 import { Mutex, FileLock } from './utils';
 import { FileWatcher, WatchOptions, PendingFile, LockUnavailableError } from './sync';
 import { EXTRACTION_VERSION } from './extraction/extraction-version';
@@ -60,6 +62,9 @@ import { minRefsForPool } from './resolution/resolver-pool';
 
 // Re-export types for consumers
 export * from './types';
+export * from './locate';
+export * from './batch';
+export * from './symbol-resolution';
 // Storage building blocks for embedded/SDK consumers that drive the graph
 // directly (open a DB, run prepared queries) rather than through the CodeGraph
 // facade. Exposed from the package entry so they no longer require deep imports
@@ -1298,6 +1303,16 @@ export class CodeGraph {
    */
   searchNodes(query: string, options?: SearchOptions): SearchResult[] {
     return this.queries.searchNodes(query, options);
+  }
+
+  /** Build a bounded multi-symbol location report in one graph session. */
+  locate(request: LocateRequest): LocateResult {
+    return locateCode(this, request);
+  }
+
+  /** Execute bounded read-only operations while reusing this open graph. */
+  executeBatch(request: BatchRequest): BatchResult {
+    return executeBatchOperations(this, request);
   }
 
   /**

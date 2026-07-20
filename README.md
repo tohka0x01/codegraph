@@ -553,6 +553,8 @@ codegraph sync [path]             # Incremental update
 codegraph status [path]           # Show statistics
 codegraph unlock [path]           # Remove a stale lock file that's blocking indexing
 codegraph query <search>          # Search symbols (--kind, --limit, --json)
+codegraph locate <query>          # Ranked symbols, bounded paths, source snippets, and affected tests (--hint, --json)
+codegraph batch [file]            # Execute bounded read-only operations from JSON (--stdin also supported)
 codegraph explore <query>         # Relevant symbols' source + call paths in one shot (same output as the codegraph_explore MCP tool)
 codegraph node <symbol|file>      # One symbol's source + callers, or read a file with line numbers (same output as codegraph_node)
 codegraph files [path]            # Show file structure (--format, --filter, --max-depth, --json)
@@ -566,6 +568,33 @@ codegraph upgrade [version]       # Update to the latest release (--check, --for
 codegraph version                 # Print the installed version (also -v, --version)
 codegraph help [command]          # Show help, optionally for one command
 ```
+
+### `codegraph locate` and `codegraph batch`
+
+`locate` performs a bounded multi-symbol investigation while opening the graph only once. Give it a human-readable intent plus precise code hints; JSON output includes ranked candidates, callers, callees, impact, source snippets, shortest paths between candidates, and affected tests.
+
+```bash
+codegraph locate "task dispatch" \
+  --hint startRun \
+  --hint spawnWorker \
+  --max-candidates 6 \
+  --json
+```
+
+`batch` executes up to 50 read-only operations in one process and preserves request order. It accepts `query`, `node`, `callers`, `callees`, `impact`, and `locate` operations. Relation operations accept a symbol name, qualified name, or the stable node ID returned by `query`.
+
+```bash
+cat <<'JSON' | codegraph batch --stdin -p .
+{
+  "operations": [
+    { "id": "entry", "op": "query", "query": "startRun", "limit": 5 },
+    { "id": "flow", "op": "locate", "intent": "task dispatch", "hints": ["startRun", "spawnWorker"] }
+  ]
+}
+JSON
+```
+
+Each batch result has `id`, `index`, `op`, and `ok`; a failed operation carries an explicit `error` without hiding successful sibling results.
 
 ### `codegraph affected`
 
@@ -633,6 +662,16 @@ const results = cg.searchNodes('UserService');
 const callers = cg.getCallers(results[0].node.id);
 const context = await cg.buildContext('fix login bug', { maxNodes: 20, includeCode: true, format: 'markdown' });
 const impact = cg.getImpactRadius(results[0].node.id, 2);
+const location = cg.locate({
+  intent: 'trace task dispatch',
+  hints: ['startRun', 'spawnWorker'],
+});
+const batch = cg.executeBatch({
+  operations: [
+    { op: 'query', query: 'startRun' },
+    { op: 'callers', symbol: results[0].node.id },
+  ],
+});
 
 cg.watch();   // auto-sync on file changes
 cg.unwatch(); // stop watching
